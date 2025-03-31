@@ -1,0 +1,114 @@
+plugins {
+    id 'java'
+    id 'java-library'
+    id 'maven-publish'
+    id 'org.jreleaser' version '1.13.1'
+}
+
+compileJava.options.encoding = "UTF-8"
+compileTestJava.options.encoding = "UTF-8"
+
+apply plugin: 'maven-publish'
+
+group 'io.gitee.codeed:redisqueue'
+version '0.0.1'
+sourceCompatibility = '1.8'
+targetCompatibility = '1.8'
+
+configurations {
+    compileOnly {
+        extendsFrom annotationProcessor
+    }
+}
+repositories {
+    maven { url 'https://maven.aliyun.com/repository/public/' }
+    mavenLocal()
+    mavenCentral()
+}
+
+java {
+    withJavadocJar()
+    withSourcesJar()
+}
+
+dependencies {
+    implementation 'org.apache.commons:commons-lang3:3.13.0'
+    implementation group: 'org.springframework.boot', name: 'spring-boot-starter-log4j2', version: '2.7.18'
+    implementation group: 'org.springframework.data', name: 'spring-data-redis', version: '2.7.18'
+    implementation group: 'org.apache.commons', name: 'commons-lang3', version: '3.12.0'
+
+    compileOnly 'org.projectlombok:lombok:1.18.30'
+    annotationProcessor 'org.projectlombok:lombok:1.18.30'
+}
+
+publishing {
+    publications {
+        maven(MavenPublication) {
+            groupId =  "io.gitee.codeed"
+            artifactId = 'redisqueue'
+
+            from components.java
+
+            pom {
+                name = 'redisqueue'
+                description = 'redisqueue'
+                url = 'https://gitee.com/codeed/redisqueue'
+                inceptionYear = '2025'
+                licenses {
+                    license {
+                        name = 'Apache-2.0'
+                        url = 'https://spdx.org/licenses/Apache-2.0.html'
+                    }
+                }
+                developers {
+                    developer {
+                        id = 'codeed'
+                        name = 'codeed'
+                    }
+                }
+                scm {
+                    connection = 'scm:git:https://gitee.com/codeed/redisqueue.git'
+                    developerConnection = 'scm:git:ssh://gitee.com/codeed/redisqueue.git'
+                    url = 'https://gitee.com/codeed/redisqueue.git'
+                }
+            }
+        }
+    }
+
+    repositories {
+        maven {
+            url = layout.projectDirectory.dir('build/staging-deploy')
+        }
+    }
+}
+
+jreleaser {
+    signing {
+        active = 'ALWAYS'
+        armored = true
+        mode = 'FILE'
+        publicKey = '/Users/edward/.jreleaser/public.pgp'
+        secretKey = '/Users/edward/.jreleaser/private.pgp'
+    }
+    deploy {
+        maven {
+//            nexus2 {
+//                'maven-central' {
+//                    active = 'ALWAYS'
+//                    url = 'https://s01.oss.sonatype.org/service/local'
+//                    snapshotUrl = 'https://s01.oss.sonatype.org/content/repositories/snapshots/'
+//                    closeRepository = true
+//                    releaseRepository = true
+//                    stagingRepository('build/staging-deploy'
+//                }
+//            }
+            mavenCentral {
+                sonatype {
+                    active = 'ALWAYS'
+                    url = 'https://central.sonatype.com/api/v1/publisher'
+                    stagingRepository('build/staging-deploy')
+                }
+            }
+        }
+    }
+}
