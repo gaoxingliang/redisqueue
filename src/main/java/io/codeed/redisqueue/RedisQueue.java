@@ -3,14 +3,19 @@ package io.codeed.redisqueue;
 import lombok.extern.log4j.*;
 import org.apache.commons.lang3.*;
 import org.apache.commons.lang3.exception.*;
+import org.springframework.data.redis.*;
 import org.springframework.data.redis.connection.stream.*;
 import org.springframework.data.redis.connection.stream.Consumer;
 import org.springframework.data.redis.core.*;
 import org.springframework.data.redis.stream.*;
 
+import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 
+/**
+ * Redis queue implementation using redis stream
+ */
 @Log4j2
 public class RedisQueue {
     private static final String KEY_STREAM_DATA = "_streamData";
@@ -27,10 +32,8 @@ public class RedisQueue {
     private final Map<String, CompletableFuture<String>> responseMap = new ConcurrentHashMap<>();
     private boolean inited = false;
 
-    public RedisQueue(
-            RedisTemplate<String, String> redisTemplate,
-            String queueName, StreamMessageListenerContainer<String, MapRecord<String, String, String>> container
-    ) {
+    public RedisQueue(RedisTemplate<String, String> redisTemplate, String queueName, StreamMessageListenerContainer<String,
+            MapRecord<String, String, String>> container) {
         this.redisTemplate = redisTemplate;
         this.requestQueueName = "request-stream-" + queueName;
         this.responseQueueName = "response-stream-" + queueName;
@@ -49,6 +52,11 @@ public class RedisQueue {
         if (supportDequeue) {
             initRequestProcessListener(requestProcessor);
         }
+        synchronized (container) {
+            if (!container.isRunning()) {
+                container.start();
+            }
+        }
         inited = true;
     }
 
@@ -63,29 +71,30 @@ public class RedisQueue {
 
 
     private void initRequestProcessListener(RequestProcessor requestProcessor) {
-        container.receive(
-                Consumer.from(requestConsumerGroupName, RandomStringUtils.randomAlphabetic(5)),
-                StreamOffset.create(requestQueueName, ReadOffset.lastConsumed()),
-                message -> {
-                    String requestId = message.getValue().get(KEY_REQUEST_ID);
-                    String data = message.getValue().get(KEY_STREAM_DATA);
-                    String result = null;
-                    try {
-                        result = requestProcessor.process(requestId, data);
-                        redisTemplate.opsForStream().add(responseQueueName, mapOfData(requestId, result, null));
-                    } catch (Exception e) {
-                        requestProcessor.handleError(requestId, data, e);
-                        redisTemplate.opsForStream().add(responseQueueName, mapOfData(requestId, result, e));
-                    }
+        createGroupQuietly(requestQueueName, requestConsumerGroupName);
 
-                    // 确认消息已处理
-                    redisTemplate.opsForStream().acknowledge(responseQueueName, requestConsumerGroupName, message.getId());
-                }
-        );
+        String consumerName = "consumer-" + RandomStringUtils.randomAlphabetic(5);
+        container.receive(Consumer.from(requestConsumerGroupName, consumerName), StreamOffset.create(requestQueueName,
+                ReadOffset.lastConsumed()), message -> {
+            String requestId = message.getValue().get(KEY_REQUEST_ID);
+            String data = message.getValue().get(KEY_STREAM_DATA);
+            String result = null;
+            try {
+                result = requestProcessor.process(requestId, data);
+                redisTemplate.opsForStream().add(responseQueueName, mapOfData(requestId, result, null));
+            } catch (Exception e) {
+                requestProcessor.handleError(requestId, data, e);
+                redisTemplate.opsForStream().add(responseQueueName, mapOfData(requestId, result, e));
+            }
+
+            // 确认消息已处理
+            redisTemplate.opsForStream().acknowledge(responseQueueName, requestConsumerGroupName, message.getId());
+        });
     }
 
     /**
      * enqueue a data and don't need the response
+     *
      * @param data
      * @throws Exception
      */
@@ -95,9 +104,10 @@ public class RedisQueue {
 
     /**
      * 入队
+     *
      * @param data
      * @param timeoutInSeconds 超时时间，单位秒，小于等于0表示不等待响应
-     * @return
+     * @return 不等待响应时返回null
      * @throws Exception
      */
     public String enqueueAndWaitResponse(String data, int timeoutInSeconds) throws Exception {
@@ -130,23 +140,34 @@ public class RedisQueue {
         }
     }
 
+    private void createGroupQuietly(String queueName, String groupName) {
+        try {
+            redisTemplate.opsForStream().createGroup(queueName, groupName);
+        } catch (Exception e) {
+            String rootMsg = ExceptionUtils.getRootCauseMessage(e);
+            if (rootMsg.contains("BUSYGROUP")) {
+                log.info("Consumer group {} already exists for {}", responseConsumerGroupName, responseQueueName);
+            } else {
+                throw e;
+            }
+        }
+    }
+
     private void initResponseListener() {
-        container.receive(
-                Consumer.from(responseConsumerGroupName, RandomStringUtils.randomAlphabetic(5)),
-                StreamOffset.create(responseQueueName, ReadOffset.lastConsumed()),
-                message -> {
-                    String requestId = message.getValue().get(KEY_REQUEST_ID);
-                    String response = message.getValue().get(KEY_STREAM_DATA);
+        createGroupQuietly(responseQueueName, responseConsumerGroupName);
+        container.receive(Consumer.from(responseConsumerGroupName, RandomStringUtils.randomAlphabetic(5)),
+                StreamOffset.create(responseQueueName, ReadOffset.lastConsumed()), message -> {
+            String requestId = message.getValue().get(KEY_REQUEST_ID);
+            String response = message.getValue().get(KEY_STREAM_DATA);
 
-                    CompletableFuture<String> future = responseMap.get(requestId);
-                    if (future != null) {
-                        future.complete(response);
-                    }
+            CompletableFuture<String> future = responseMap.get(requestId);
+            if (future != null) {
+                future.complete(response);
+            }
 
-                    // 确认消息已处理
-                    redisTemplate.opsForStream().acknowledge(responseQueueName, responseConsumerGroupName, message.getId());
-                }
-        );
+            // 确认消息已处理
+            redisTemplate.opsForStream().acknowledge(responseQueueName, responseConsumerGroupName, message.getId());
+        });
     }
 }
 
