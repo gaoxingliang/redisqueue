@@ -1,5 +1,6 @@
 package io.codeed.redisqueue;
 
+import lombok.*;
 import lombok.extern.log4j.*;
 import org.apache.commons.lang3.*;
 import org.apache.commons.lang3.exception.*;
@@ -21,6 +22,8 @@ public class RedisQueue {
     private static final String KEY_STREAM_DATA = "_streamData";
     private static final String KEY_REQUEST_ID = "_requestId";
     private static final String KEY_ERROR = "_error";
+    private static final long DEFAULT_STREAM_TTL_MINUTES = 60; // Stream 默认1小时过期
+    private static final long DEFAULT_MAX_LENGTH = 10000;    // Stream 默认最大长度
 
     private final RedisTemplate<String, String> redisTemplate;
     private final String requestConsumerGroupName;
@@ -32,8 +35,14 @@ public class RedisQueue {
     private final Map<String, CompletableFuture<String>> responseMap = new ConcurrentHashMap<>();
     private boolean inited = false;
 
-    public RedisQueue(RedisTemplate<String, String> redisTemplate, String queueName, StreamMessageListenerContainer<String,
-            MapRecord<String, String, String>> container) {
+    @Setter
+    private Long streamTtlMinutes = DEFAULT_STREAM_TTL_MINUTES;
+    @Setter
+    private Long maxLength = DEFAULT_MAX_LENGTH;
+
+    public RedisQueue(RedisTemplate<String, String> redisTemplate, String queueName,
+            StreamMessageListenerContainer<String, MapRecord<String, String, String>> container
+    ) {
         this.redisTemplate = redisTemplate;
         this.requestQueueName = "request-stream-" + queueName;
         this.responseQueueName = "response-stream-" + queueName;
@@ -42,6 +51,12 @@ public class RedisQueue {
         this.responseConsumerGroupName = "response-stream-cg-" + queueName;
     }
 
+    /**
+     * init the queue
+     * @param supportEnqueue support enqueue operation
+     * @param supportDequeue support dequeue and process
+     * @param requestProcessor if support dequeue, must set this request processor function.
+     */
     public void init(boolean supportEnqueue, boolean supportDequeue, RequestProcessor requestProcessor) {
         if (inited) {
             return;
@@ -50,6 +65,9 @@ public class RedisQueue {
             initResponseListener();
         }
         if (supportDequeue) {
+            if (requestProcessor == null) {
+                throw new IllegalArgumentException("the request processor should not be null when supportDequeue");
+            }
             initRequestProcessListener(requestProcessor);
         }
         synchronized (container) {
@@ -57,7 +75,22 @@ public class RedisQueue {
                 container.start();
             }
         }
+        Executors.newSingleThreadScheduledExecutor().scheduleAtFixedRate(this::doCleanJob, 1, 1, TimeUnit.MINUTES);
         inited = true;
+    }
+
+    private void doCleanJob() {
+        try {
+            // 限制stream长度，保留最新的消息
+            redisTemplate.opsForStream().trim(requestQueueName, maxLength, true);
+            redisTemplate.opsForStream().trim(responseQueueName, maxLength, true);
+
+            // 刷新过期时间
+            redisTemplate.expire(requestQueueName, streamTtlMinutes, TimeUnit.MINUTES);
+            redisTemplate.expire(responseQueueName, streamTtlMinutes, TimeUnit.MINUTES);
+        } catch (Exception e) {
+            log.warn("Failed to cleanup old messages", e);
+        }
     }
 
     private Map<String, String> mapOfData(String requestId, String data, Exception e) {
@@ -159,10 +192,14 @@ public class RedisQueue {
                 StreamOffset.create(responseQueueName, ReadOffset.lastConsumed()), message -> {
             String requestId = message.getValue().get(KEY_REQUEST_ID);
             String response = message.getValue().get(KEY_STREAM_DATA);
-
+            String error = message.getValue().get(KEY_ERROR);
             CompletableFuture<String> future = responseMap.get(requestId);
             if (future != null) {
-                future.complete(response);
+                if (StringUtils.isNotEmpty(error)) {
+                    future.completeExceptionally(new Exception("处理失败：" + error));
+                } else {
+                    future.complete(response);
+                }
             }
 
             // 确认消息已处理
