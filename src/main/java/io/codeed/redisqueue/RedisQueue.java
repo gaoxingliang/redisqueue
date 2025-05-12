@@ -3,6 +3,7 @@ package io.codeed.redisqueue;
 import lombok.*;
 import lombok.extern.log4j.*;
 import org.apache.commons.lang3.*;
+import org.apache.commons.lang3.concurrent.*;
 import org.apache.commons.lang3.exception.*;
 import org.springframework.data.redis.*;
 import org.springframework.data.redis.connection.stream.*;
@@ -40,9 +41,12 @@ public class RedisQueue {
     @Setter
     private Long maxLength = DEFAULT_MAX_LENGTH;
 
+    private final String queueName;
+
     public RedisQueue(RedisTemplate<String, String> redisTemplate, String queueName,
             StreamMessageListenerContainer<String, MapRecord<String, String, String>> container
     ) {
+        this.queueName = queueName;
         this.redisTemplate = redisTemplate;
         this.requestQueueName = "request-stream-" + queueName;
         this.responseQueueName = "response-stream-" + queueName;
@@ -75,7 +79,11 @@ public class RedisQueue {
                 container.start();
             }
         }
-        Executors.newSingleThreadScheduledExecutor().scheduleAtFixedRate(this::doCleanJob, 1, 1, TimeUnit.MINUTES);
+        BasicThreadFactory factory = new BasicThreadFactory.Builder()
+                .namingPattern("clean-" + queueName)
+                .daemon(true).build();
+
+        Executors.newSingleThreadScheduledExecutor(factory).scheduleAtFixedRate(this::doCleanJob, 1, 1, TimeUnit.MINUTES);
         inited = true;
     }
 
